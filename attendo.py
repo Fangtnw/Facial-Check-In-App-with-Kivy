@@ -11,6 +11,7 @@ from kivy.logger import Logger
 from kivy.lang import Builder
 from kivy.uix.textinput import TextInput
 from kivy.uix.popup import Popup
+from kivy.graphics import Rectangle, Color, Line
 
 import cv2
 import numpy as np
@@ -96,11 +97,15 @@ class RegistrationScreen(Screen):
     def update(self, *args):
         ret, frame = self.capture.read()
         if ret:
-            frame = frame[0:480, 0:640, :]
-            buf = cv2.flip(frame, 0).tobytes()
-            img_texture = Texture.create(size=(frame.shape[1], frame.shape[0]), colorfmt='bgr')
-            img_texture.blit_buffer(buf, colorfmt='bgr', bufferfmt='ubyte')
-            self.web_cam.texture = img_texture
+            self.frame = frame[0:480, 0:640, :]
+
+            # drawn_frame = self.face_recog()
+            drawn_frame = self.face_recog()
+            if drawn_frame is not None:
+                buf = cv2.flip(drawn_frame, 0).tobytes()
+                img_texture = Texture.create(size=(drawn_frame.shape[1], drawn_frame.shape[0]), colorfmt='bgr')
+                img_texture.blit_buffer(buf, colorfmt='bgr', bufferfmt='ubyte')
+                self.web_cam.texture = img_texture
 
     def capture_face(self, instance):
         user_provided_name = self.name_input.text.strip()
@@ -161,7 +166,7 @@ class CheckinScreen(Screen):
 
     def on_enter(self):
         self.capture = cv2.VideoCapture(0)
-        Clock.schedule_interval(self.update, 1.0 / 60.0)
+        Clock.schedule_interval(self.update, 1.0 / 120.0)
         path = 'FaceData'
         self.update_message("Syncing face database . . .")
         self.encodeListKnown, self.classNames = load_images_and_encodings(path)
@@ -169,17 +174,20 @@ class CheckinScreen(Screen):
         self.face_recog_thread = threading.Thread(target=self.face_recog_threaded)
         self.face_recog_thread.daemon = True  
         self.face_recog_thread.start()
+        self.drawn_frame = None
 
     def update(self, *args):
         ret, frame = self.capture.read()
         if ret:
             self.frame = frame[0:480, 0:640, :]
-            drawn_frame = self.frame
+
             # drawn_frame = self.face_recog()
-        buf = cv2.flip(drawn_frame, 0).tobytes()
-        img_texture = Texture.create(size=(drawn_frame.shape[1], drawn_frame.shape[0]), colorfmt='bgr')
-        img_texture.blit_buffer(buf, colorfmt='bgr', bufferfmt='ubyte')
-        self.web_cam.texture = img_texture
+            drawn_frame = self.frame
+            if drawn_frame is not None:
+                buf = cv2.flip(drawn_frame, 0).tobytes()
+                img_texture = Texture.create(size=(drawn_frame.shape[1], drawn_frame.shape[0]), colorfmt='bgr')
+                img_texture.blit_buffer(buf, colorfmt='bgr', bufferfmt='ubyte')
+                self.web_cam.texture = img_texture
 
     def reset(self, instance):
         self.detected_faces.clear()
@@ -189,7 +197,7 @@ class CheckinScreen(Screen):
         self.update_message("Detected faces reset.")
 
     def face_recog(self):
-        imgS = cv2.resize(self.frame, (0, 0), None, 0.25, 0.25)
+        imgS = cv2.resize(self.frame, (0, 0), None, 0.8, 0.8)
         imgS = cv2.cvtColor(imgS, cv2.COLOR_BGR2RGB)
 
         facesCurFrame = face_recognition.face_locations(imgS)
@@ -213,10 +221,22 @@ class CheckinScreen(Screen):
 
             if len(faceDis) > 0:  
                 min_distance = min(faceDis)
-                if min_distance < 0.6: 
+                if min_distance < 0.5: 
                     matchIndex = np.argmin(faceDis)
                     name = self.classNames[matchIndex].upper()
                     namenotify = self.classNames[matchIndex]
+                    y1, x2, y2, x1 = faceLoc
+                    y1, x2, y2, x1 = y1 * 4, x2 * 4, y2 * 4, x1 * 4
+
+                    # Draw rectangle around the face
+                    cv2.rectangle(drawn_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+                    # Draw filled rectangle for label
+                    cv2.rectangle(drawn_frame, (x1, y2 - 35), (x2, y2), (0, 255, 0), cv2.FILLED)
+
+                    # Draw text label
+                    cv2.putText(drawn_frame, name, (x1 + 6, y2 - 6), cv2.FONT_HERSHEY_COMPLEX, 1, (255, 255, 255), 2)
+
                 else:
                     name = 'Unknown'
                     namenotify = 'Unknown'
@@ -225,11 +245,7 @@ class CheckinScreen(Screen):
                 name = 'Unknown'
                 namenotify = 'Unknown'
                 self.update_message("Face Detected : " + namenotify)
-            y1, x2, y2, x1 = faceLoc
-            y1, x2, y2, x1 = y1 * 4, x2 * 4, y2 * 4, x1 * 4
-            cv2.rectangle(self.frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            cv2.rectangle(self.frame, (x1, y2 - 35), (x2, y2), (0, 255, 0), cv2.FILLED)
-            cv2.putText(self.frame, name, (x1 + 6, y2 - 6), cv2.FONT_HERSHEY_COMPLEX, 1, (255, 255, 255), 2)
+
             print(namenotify)
             message = f'{namenotify} checked at {datetime.now().strftime("%H:%M:%S")}'
             if namenotify != 'Unknown' and namenotify not in self.detected_faces:
@@ -242,21 +258,44 @@ class CheckinScreen(Screen):
                     self.update_message("Face Detected : " + namenotify)
         elif num_detected_faces > 1:
             names = []
-            for encodeFace in encodesCurFrame:
+            for encodeFace, faceLoc in zip(encodesCurFrame, facesCurFrame):
                 faceDis = face_recognition.face_distance(self.encodeListKnown, encodeFace)
                 if len(faceDis) > 0:  
                     min_distance = min(faceDis)
                     if min_distance < 0.6: 
                         matchIndex = np.argmin(faceDis)
+                        namenotify = self.classNames[matchIndex]
                         name = self.classNames[matchIndex].upper()
                         names.append(name)
+                        y1, x2, y2, x1 = faceLoc
+                        y1, x2, y2, x1 = y1 * 4, x2 * 4, y2 * 4, x1 * 4
+
+                        # Draw rectangle around the face
+                        cv2.rectangle(drawn_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+                        # Draw filled rectangle for label
+                        cv2.rectangle(drawn_frame, (x1, y2 - 35), (x2, y2), (0, 255, 0), cv2.FILLED)
+
+                        # Draw text label
+                        cv2.putText(drawn_frame, name, (x1 + 6, y2 - 6), cv2.FONT_HERSHEY_COMPLEX, 1, (255, 255, 255), 2)
+
                     else:
                         names.append('Unknown')
+                        namenotify = 'Unknown'
+                        self.update_message("Face Detected : " + namenotify)
                 else:
                     names.append('Unknown')
+            message = f'{namenotify} checked at {datetime.now().strftime("%H:%M:%S")}'
+            if namenotify != 'Unknown' and namenotify not in self.detected_faces:
+                    self.detected_faces.add(namenotify)
+                    markAttendance(name)
+                    linenotify(message)
+            else:
+                if namenotify != 'Unknown':
+                    print("Already checked")
+                    self.update_message("Face Detected : " + namenotify)
             names_str = ', '.join(names)
-            self.update_message(f"Multiple faces detected: {names_str}")
-
+            self.update_message(f"{num_detected_faces} faces detected: {names_str}")
         return drawn_frame
 
     def face_recog_threaded(self):
